@@ -25,9 +25,9 @@ ClearBar does one job, making the taskbar **clear** or **blurred**, and does it 
 <tr><td>Background CPU</td><td>0.2% avg over a 12.9 h session (0.47% in a 10 s sample)</td><td><b>not measurable</b>&nbsp;¹</td><td>effectively zero</td></tr>
 <tr><td>Threads</td><td>26</td><td><b>1–4</b></td><td><b>~6–26× fewer</b></td></tr>
 <tr><td>Handles</td><td>635</td><td><b>108</b></td><td><b>~6× fewer</b></td></tr>
-<tr><td>DLL loaded into Explorer</td><td>553 KB</td><td><b>264 KB</b></td><td><b>~2× smaller</b></td></tr>
-<tr><td>Download</td><td>1.77 MB (portable zip) / 4.17 MB (Store bundle)</td><td><b>237 KB</b></td><td><b>~7–17× smaller</b></td></tr>
-<tr><td>Installed size</td><td>—</td><td><b>470 KB</b> (2 files)</td><td></td></tr>
+<tr><td>DLL loaded into Explorer</td><td>553 KB</td><td><b>267 KB</b></td><td><b>~2× smaller</b></td></tr>
+<tr><td>Download</td><td>1.77 MB (portable zip) / 4.17 MB (Store bundle)</td><td><b>247 KB</b></td><td><b>~7–17× smaller</b></td></tr>
+<tr><td>Installed size</td><td>—</td><td><b>~480 KB</b></td><td></td></tr>
 <tr><td>Network code</td><td>none</td><td><b>none</b></td><td>same</td></tr>
 <tr><td>Settings UI / tray icon</td><td>yes</td><td>no (one text file)</td><td>trade-off</td></tr>
 </table>
