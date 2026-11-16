@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed only to publish releases on v* tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (MSVC, x64, release)
+        shell: cmd
+        run: build.cmd
+
+      - name: Unit tests
+        shell: cmd
+        run: out\tests.exe
+
+      - name: Leak scan (no user paths / PDB paths / e-mails in binaries)
+        shell: pwsh
+        run: python -I tests/leak_scan.py out/ClearBar.exe out/ClearBarTap.dll
+
+      - name: Package
+        shell: pwsh
+        run: ./package.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClearBar-x64
+          path: dist/*
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $notes = if (Test-Path "docs/release-notes/$tag.md") { "docs/release-notes/$tag.md" } else { $null }
+          $files = Get-ChildItem dist -File | ForEach-Object FullName
+          if ($notes) { gh release create $tag @files --title "ClearBar $tag" --notes-file $notes }
+          else { gh release create $tag @files --title "ClearBar $tag" --generate-notes }

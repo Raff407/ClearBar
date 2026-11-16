@@ -1,0 +1,6 @@
+LIBRARY ClearBarTap
+EXPORTS
+  DllGetClassObject PRIVATE
+  DllCanUnloadNow PRIVATE
+  ClearBarHookProc
+  ClearBarTryRetry

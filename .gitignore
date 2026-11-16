@@ -1,0 +1,11 @@
+out/
+dist/
+stage/
+*.log
+*.obj
+*.pdb
+*.exe
+*.dll
+*.res
+config.ini
+config.v1.bak
