@@ -24,6 +24,10 @@ jobs:
         shell: cmd
         run: out\tests.exe
 
+      - name: Import check (no APIs missing on Windows 10 19041)
+        shell: pwsh
+        run: python -I tests/import_check.py out/ClearBar.exe out/ClearBarTap.dll
+
       - name: Leak scan (no user paths / PDB paths / e-mails in binaries)
         shell: pwsh
         run: python -I tests/leak_scan.py out/ClearBar.exe out/ClearBarTap.dll

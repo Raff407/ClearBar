@@ -9,3 +9,5 @@ stage/
 *.res
 config.ini
 config.v1.bak
+__pycache__/
+*.testbak

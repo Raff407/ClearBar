@@ -10,12 +10,12 @@ Remove-Item 'dist' -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item 'out\ClearBar.exe', 'out\ClearBarTap.dll', 'Install.cmd', 'install.ps1', 'Uninstall.cmd', 'uninstall.ps1', 'LICENSE' $stage
 @"
-ClearBar $version - transparent / blurred Windows 11 taskbar
+ClearBar $version - transparent / blurred Windows 10/11 taskbar
 =============================================================
 
 Install:    extract the zip, double-click Install.cmd   (no admin; starts with Windows)
-Requires:   Windows 11, x64
-Uninstall:  Settings > Apps > Installed apps > ClearBar, or double-click Uninstall.cmd
+Requires:   Windows 11, or Windows 10 2004-22H2; x64
+Uninstall:  Settings > Apps > Installed apps (Windows 10: Apps & features) > ClearBar, or double-click Uninstall.cmd
 Settings:   %LOCALAPPDATA%\Programs\ClearBar\config.ini  (saving applies instantly)
 
   [desktop]

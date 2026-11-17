@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include "../src/exe/logic.h"
+#include "../src/exe/accent.h"  // Windows 10 accent policy (pure)
 
 using namespace cb;
 
@@ -208,6 +209,69 @@ static void TestSeqlockStress() {
   CHECK(reads > 0);
 }
 
+// ---- Windows version gate (protocol.h) ----
+static void TestOsVersion() {
+  CHECK(!IsClassicTaskbarBuild(0));      // unknown: behaves like Windows 11 (v1.0)
+  CHECK(IsClassicTaskbarBuild(19045));
+  CHECK(IsClassicTaskbarBuild(21999));
+  CHECK(!IsClassicTaskbarBuild(22000));
+  CHECK(IsSupportedBuild(0, 0));
+  CHECK(!IsSupportedBuild(19040, kProductWorkstation));
+  CHECK(IsSupportedBuild(19041, kProductWorkstation));
+  CHECK(IsSupportedBuild(19045, kProductWorkstation));
+  CHECK(!IsSupportedBuild(19046, kProductWorkstation));  // Insider
+  CHECK(!IsSupportedBuild(19044, 3));                     // Server in the classic range
+  CHECK(!IsSupportedBuild(20348, 3));                     // Server 2022
+  CHECK(IsSupportedBuild(22000, kProductWorkstation));
+  CHECK(IsSupportedBuild(26100, 3));                      // 22000+: v1.0 rule, any edition
+  // A compatibility layer reports an older Windows: unknown build -> Windows 11 path (v1.0 behaviour).
+  CHECK(SanitizeBuild(6, 9200) == 0 && SanitizeBuild(6, 7600) == 0);
+  CHECK(SanitizeBuild(10, 19045) == 19045 && SanitizeBuild(10, 26300) == 26300);
+  CHECK(!IsClassicTaskbarBuild(SanitizeBuild(6, 9200)) && IsSupportedBuild(SanitizeBuild(6, 9200), 1));
+  OsInfo os = QueryOs();
+  CHECK(os.build != 0);
+  CHECK(os.productType != 0);
+}
+
+// ---- Windows 10 accent policy (accent.h) ----
+static Appearance App(Kind k, uint32_t blur = kDefaultBlur, uint32_t line = 0) {
+  return Appearance{static_cast<uint32_t>(k), blur, line, 0};
+}
+
+static void TestWin10Accent() {
+  using namespace cb::accent;
+  const AccentPolicy clear{ACCENT_ENABLE_TRANSPARENTGRADIENT, kAccentFlagGradientColor, 0u, 0};
+  const AccentPolicy blur{ACCENT_ENABLE_BLURBEHIND, kAccentFlagGradientColor, 0u, 0};
+  CHECK(Win10Accent(App(Kind::Clear)) == clear);
+  CHECK(Win10Accent(App(Kind::Blur)) == blur);
+  // Windows 10: fixed DWM blur, no top line -> strength and line do not change the accent.
+  CHECK(Win10Accent(App(Kind::Blur, 1)) == blur && Win10Accent(App(Kind::Blur, 50, 1)) == blur);
+  CHECK(Win10Accent(App(Kind::Clear, 8, 1)) == clear);
+  CHECK(IsCustom(App(Kind::Clear)) && IsCustom(App(Kind::Blur)) && !IsCustom(App(Kind::Normal)));
+  CHECK(kWcaAccentPolicy == 19 && kMsgDwmCompositionChanged == 0x031E);
+}
+
+// ---- Windows 10 shell windows (logic.h) ----
+static void TestClassifyClassic() {
+  using S = ShellSurface;
+  // Start and Search are the same apps as on Windows 11.
+  CHECK(ClassifyForegroundClassic(L"Windows.UI.Core.CoreWindow", L"Start", L"StartMenuExperienceHost.exe", false) == S::Start);
+  CHECK(ClassifyForegroundClassic(L"Windows.UI.Core.CoreWindow", L"Search", L"SearchApp.exe", false) == S::Search);
+  // Task View on Windows 10 2004+: an explorer.exe window titled "Task View".
+  CHECK(ClassifyForegroundClassic(L"Windows.UI.Core.CoreWindow", L"Task View", L"explorer.exe", true) == S::TaskView);
+  CHECK(ClassifyForegroundClassic(L"MultitaskingViewFrame", L"Task View", L"explorer.exe", true) == S::TaskView);
+  // Alt+Tab is not Task View.
+  CHECK(ClassifyForegroundClassic(L"MultitaskingViewFrame", L"Task Switching", L"explorer.exe", true) == S::None);
+  CHECK(ClassifyForegroundClassic(L"MultitaskingViewFrame", L"Task View", L"other.exe", true) == S::None);
+  // Action Center and other explorer CoreWindows are not Task View unless they cover the screen.
+  CHECK(ClassifyForegroundClassic(L"Windows.UI.Core.CoreWindow", L"Action center", L"ShellExperienceHost.exe", false) == S::None);
+  CHECK(ClassifyForegroundClassic(L"Windows.UI.Core.CoreWindow", L"Something", L"explorer.exe", false) == S::None);
+  CHECK(ClassifyForegroundClassic(L"ForegroundStaging", L"", L"explorer.exe", true) == S::None);
+  // The Windows 11 classifier is unchanged.
+  CHECK(ClassifyForeground(L"MultitaskingViewFrame", L"Task View", L"explorer.exe", true) == S::None);
+  CHECK(ClassifyForeground(L"XamlExplorerHostIslandWindow", L"Task View", L"explorer.exe", true) == S::TaskView);
+}
+
 int main() {
   TestBlurValue();
   TestBoolAccent();
@@ -220,6 +284,9 @@ int main() {
   TestUserWindow();
   TestProtocol();
   TestSeqlockStress();
+  TestOsVersion();
+  TestWin10Accent();
+  TestClassifyClassic();
   printf("%d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

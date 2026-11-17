@@ -2,7 +2,8 @@
 //  * no UI, no tray icon, no network, no polling
 //  * reads config.ini next to the exe (hot reload on save)
 //  * decides each taskbar's appearance from the active "dynamic mode"
-//  * publishes it to ClearBarTap.dll (inside explorer) via shared memory
+//  * Windows 11: publishes it to ClearBarTap.dll (inside explorer) via shared memory
+//  * Windows 10: sets the taskbar windows' accent policy itself (no DLL in explorer)
 //
 // Command line:  ClearBar.exe            run (no-op if already running)
 //                ClearBar.exe --exit     stop the running instance (taskbar restores)
@@ -15,7 +16,9 @@
 #include <stdarg.h>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include "logic.h"
+#include "accent.h"
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "wtsapi32.lib")
@@ -29,11 +32,15 @@ constexpr UINT_PTR kTimerReset = 2;
 constexpr UINT_PTR kTimerInjectTimeout = 3;
 constexpr UINT_PTR kTimerInjectRetry = 4;
 constexpr UINT_PTR kTimerReload = 5;
+constexpr UINT_PTR kTimerClassic = 6;
 constexpr UINT kMsgReload = WM_APP + 1;
 
 constexpr UINT kRecomputeDelayMs = 15;
 constexpr UINT kInjectTimeoutMs = 35000;
 constexpr int kMaxInjectFailures = 5;
+// Windows 10: after a shell event, put our accent back at these times (ms),
+// because Explorer may re-apply its own look while handling the same event.
+constexpr UINT kClassicReapplyMs[] = {30, 120, 250, 500, 1000};
 
 const wchar_t kDefaultConfig[] =
     L"; ClearBar configuration. Saving this file applies changes instantly.\r\n"
@@ -42,8 +49,8 @@ const wchar_t kDefaultConfig[] =
     L";             clear  - fully see-through\r\n"
     L";             blur   - see-through with a soft blur of what is behind the taskbar\r\n"
     L";             normal - Windows' own taskbar background\r\n"
-    L"; blur      = 1-50   blur strength for accent = blur (default 8)\r\n"
-    L"; show_line = true | false   (the thin line along the top edge of the Windows 11 taskbar)\r\n"
+    L"; blur      = 1-50   blur strength for accent = blur (default 8; Windows 10 uses its fixed system blur)\r\n"
+    L"; show_line = true | false   (the thin line along the top edge of the taskbar; Windows 11 only)\r\n"
     L"; enabled   = true | false   (desktop is always enabled)\r\n"
     L";\r\n"
     L"; Priority when several apply: task_view_opened > start_opened > search_opened >\r\n"
@@ -128,6 +135,13 @@ struct App {
 
   std::vector<HWINEVENTHOOK> eventHooks;
   bool shellHooks = false, windowHooks = false;
+
+  // Windows 10 ("classic") taskbar: ClearBar.exe sets the accent itself.
+  bool classic = false;
+  using SwcaFn = BOOL(WINAPI*)(HWND, accent::WindowCompositionAttribData*);
+  SwcaFn swca = nullptr;
+  std::vector<HWND> customBars;  // taskbars currently showing ClearBar's accent
+  size_t classicStep = 0;
 };
 App g;
 
@@ -381,24 +395,61 @@ bool IsShellOrSelf(HWND h, const std::wstring& cls) {
          cls == L"Shell_SecondaryTrayWnd";
 }
 
+// Windows 10: Start and Search are shown by uncloaking their CoreWindows (they
+// stay "visible" while hidden, just cloaked). While Start is open, Search's
+// window is uncloaked too and holds the keyboard focus, so Start wins there.
+// FindWindowEx, not EnumWindows: EnumWindows skips Store-app (CoreWindow) windows.
+void GatherClassicShell(std::vector<MonitorFacts>& facts) {
+  std::vector<bool> start(facts.size(), false), search(facts.size(), false);
+  HWND h = nullptr;
+  while ((h = FindWindowExW(nullptr, h, L"Windows.UI.Core.CoreWindow", nullptr)) != nullptr) {
+    if (!IsWindowVisible(h) || IsCloaked(h)) continue;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    const std::wstring exeName = FileNameOf(ProcessImagePath(pid));
+    const bool isStart = IEquals(exeName, L"StartMenuExperienceHost.exe");
+    const bool isSearch = IEquals(exeName, L"SearchApp.exe");
+    if (!isStart && !isSearch) continue;
+    RECT r{};
+    if (!GetWindowRect(h, &r) || IsRectEmpty(&r)) continue;
+    const int idx = TaskbarIndexForMonitor(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST));
+    if (idx < 0) continue;
+    (isStart ? start : search)[idx] = true;
+  }
+  for (size_t i = 0; i < facts.size(); ++i) {
+    facts[i].startOpen = start[i];
+    facts[i].searchOpen = search[i] && !start[i];
+  }
+}
+
 void GatherFacts(std::vector<MonitorFacts>& facts) {
   facts.assign(g.taskbars.size(), MonitorFacts{});
+  if (g.classic && (g.cfg.modes[ModeStartOpened].enabled || g.cfg.modes[ModeSearchOpened].enabled))
+    GatherClassicShell(facts);
   if (NeedsShellTracking(g.cfg)) {
     HWND fg = GetForegroundWindow();
     if (fg && !IsCloaked(fg) && IsWindowVisible(fg)) {
       DWORD pid = 0;
       GetWindowThreadProcessId(fg, &pid);
       const std::wstring cls = ClassOf(fg);
-      if (cls == L"Windows.UI.Core.CoreWindow" || cls == L"XamlExplorerHostIslandWindow") {
+      if (cls == L"Windows.UI.Core.CoreWindow" || cls == L"XamlExplorerHostIslandWindow" ||
+          (g.classic && cls == L"MultitaskingViewFrame")) {
         HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{sizeof(mi)};
         RECT wr{};
         GetWindowRect(fg, &wr);
         const bool covers = GetMonitorInfoW(mon, &mi) && EqualRect(&wr, &mi.rcMonitor);
-        const ShellSurface s = ClassifyForeground(cls, TitleOf(fg), FileNameOf(ProcessImagePath(pid)), covers);
+        const std::wstring title = TitleOf(fg), exeName = FileNameOf(ProcessImagePath(pid));
+        const ShellSurface s = g.classic ? ClassifyForegroundClassic(cls, title, exeName, covers)
+                                         : ClassifyForeground(cls, title, exeName, covers);
+        Log(L"foreground %s \"%s\" %s covers=%d -> surface %d", cls.c_str(), title.c_str(), exeName.c_str(),
+            covers ? 1 : 0, static_cast<int>(s));
         const int idx = TaskbarIndexForMonitor(mon);
         if (s == ShellSurface::TaskView) {
           for (auto& f : facts) f.taskViewOpen = true;  // Task View spans all monitors
+        } else if (g.classic) {
+          // Windows 10: Start / Search come from GatherClassicShell (the focus
+          // sits in Search's window while Start is open).
         } else if (idx >= 0 && s == ShellSurface::Start) {
           facts[idx].startOpen = true;
         } else if (idx >= 0 && s == ShellSurface::Search) {
@@ -437,6 +488,92 @@ void GatherFacts(std::vector<MonitorFacts>& facts) {
   }
 }
 
+// ------------------------------------------------- Windows 10 (classic)
+void Recompute(bool force);
+
+bool IsCustomBar(HWND h) {
+  return std::find(g.customBars.begin(), g.customBars.end(), h) != g.customBars.end();
+}
+
+bool ClassicSet(HWND h, const Appearance& a) {
+  if (!g.swca) return false;
+  accent::AccentPolicy p = accent::Win10Accent(a);
+  accent::WindowCompositionAttribData d{};
+  d.Attrib = accent::kWcaAccentPolicy;
+  d.pvData = &p;
+  d.cbData = sizeof(p);
+  return g.swca(h, &d) != FALSE;
+}
+
+// Windows' own look: ask Explorer to re-apply its accent to that taskbar.
+// False if the message could not be delivered (the caller keeps the bar listed
+// so the restore is retried next time).
+bool ClassicRestore(HWND h) {
+  DWORD_PTR r = 0;
+  if (SendMessageTimeoutW(h, accent::kMsgDwmCompositionChanged, 1, 0, SMTO_ABORTIFHUNG | SMTO_NORMAL, 500, &r))
+    return true;
+  Log(L"restore message to %p failed %lu", h, GetLastError());
+  return false;
+}
+
+// The set of taskbar windows right now differs from the one we track (a bar
+// appeared or went away without a display / work-area change).
+bool TaskbarSetChanged() {
+  std::vector<HWND> now;
+  if (HWND p = FindWindowW(L"Shell_TrayWnd", nullptr)) now.push_back(p);
+  HWND h = nullptr;
+  while ((h = FindWindowExW(nullptr, h, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr) now.push_back(h);
+  if (now.size() != g.taskbars.size()) return true;
+  for (HWND w : now)
+    if (std::none_of(g.taskbars.begin(), g.taskbars.end(), [w](const Taskbar& t) { return t.hwnd == w; })) return true;
+  return false;
+}
+
+void ApplyClassic(const std::vector<Appearance>& apps) {
+  g.customBars.erase(std::remove_if(g.customBars.begin(), g.customBars.end(), [](HWND c) { return !IsWindow(c); }),
+                     g.customBars.end());
+  for (size_t i = 0; i < g.taskbars.size() && i < apps.size(); ++i) {
+    const HWND h = g.taskbars[i].hwnd;
+    if (accent::IsCustom(apps[i])) {
+      if (!ClassicSet(h, apps[i])) Log(L"SetWindowCompositionAttribute(%p) failed %lu", h, GetLastError());
+      if (!IsCustomBar(h)) g.customBars.push_back(h);
+    } else if (IsCustomBar(h) && ClassicRestore(h)) {
+      g.customBars.erase(std::find(g.customBars.begin(), g.customBars.end(), h));
+    }
+  }
+}
+
+void RestoreClassic() {
+  for (HWND h : g.customBars)
+    if (IsWindow(h)) ClassicRestore(h);
+  g.customBars.clear();
+}
+
+// Re-sets the custom bars only (never re-sends restores): a short burst of
+// timers after a shell event, never a steady poll.
+void ScheduleClassicReapply() {
+  if (!g.classic) return;
+  g.classicStep = 0;
+  SetTimer(g.wnd, kTimerClassic, kClassicReapplyMs[0], nullptr);
+}
+
+void OnClassicTimer() {
+  if (g.classicStep == 0 && TaskbarSetChanged()) {  // e.g. a new monitor's taskbar
+    SetTimer(g.wnd, kTimerReset, 100, nullptr);
+    return;
+  }
+  // Shell windows finish (un)cloaking after their animations: re-check the mode
+  // on the first steps; the later steps only put the accent back.
+  if (g.classicStep < 2) Recompute(false);
+  if (g.lastValid)
+    for (size_t i = 0; i < g.taskbars.size() && i < g.lastWritten.size(); ++i)
+      if (accent::IsCustom(g.lastWritten[i]) && IsCustomBar(g.taskbars[i].hwnd))
+        ClassicSet(g.taskbars[i].hwnd, g.lastWritten[i]);
+  const size_t next = ++g.classicStep;
+  if (next < _countof(kClassicReapplyMs))
+    SetTimer(g.wnd, kTimerClassic, kClassicReapplyMs[next] - kClassicReapplyMs[next - 1], nullptr);
+}
+
 void Recompute(bool force) {
   if (g.taskbars.empty()) return;
   std::vector<MonitorFacts> facts;
@@ -453,7 +590,8 @@ void Recompute(bool force) {
     Log(L"taskbar %p -> kind %u blur %u line %u", g.taskbars[i].hwnd, apps[i].kind, apps[i].blur, apps[i].showLine);
   g.lastWritten = apps;
   g.lastValid = true;
-  Publish(apps, force);
+  if (g.classic) ApplyClassic(apps);
+  else Publish(apps, force);
 }
 
 void ScheduleRecompute() { SetTimer(g.wnd, kTimerRecompute, kRecomputeDelayMs, nullptr); }
@@ -471,6 +609,9 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
     case EVENT_SYSTEM_FOREGROUND:
     case EVENT_OBJECT_CLOAKED:
     case EVENT_OBJECT_UNCLOAKED:
+      ScheduleRecompute();
+      ScheduleClassicReapply();  // Windows 10 only
+      return;
     case EVENT_SYSTEM_MINIMIZESTART:
     case EVENT_SYSTEM_MINIMIZEEND:
     case EVENT_SYSTEM_MOVESIZEEND:
@@ -504,7 +645,9 @@ void AddHook(DWORD min, DWORD max) {
 }
 
 void UpdateEventHooks() {
-  const bool wantShell = NeedsShellTracking(g.cfg) || NeedsWindowTracking(g.cfg);
+  // Windows 10 always listens for shell events: they are also when Explorer
+  // tends to re-apply its own taskbar accent.
+  const bool wantShell = g.classic || NeedsShellTracking(g.cfg) || NeedsWindowTracking(g.cfg);
   const bool wantWindow = NeedsWindowTracking(g.cfg);
   if (wantShell == g.shellHooks && wantWindow == g.windowHooks) return;
   for (auto h : g.eventHooks) UnhookWinEvent(h);
@@ -603,14 +746,21 @@ void ResetState() {
   const uint64_t oldCreated = g.explorerCreated;
   EnumerateTaskbars();
   if (g.explorerPid != oldPid || g.explorerCreated != oldCreated || g.taskbars.empty()) {
+    // Windows 10: a new explorer (or our start-up). A bar may still carry an
+    // accent from an earlier ClearBar that was killed, so treat every bar as
+    // ours once: a bar that should look normal then gets one restore message.
+    g.customBars.clear();
+    if (g.classic)
+      for (const Taskbar& t : g.taskbars) g.customBars.push_back(t.hwnd);
     CloseReady();
     g.injectFailures = 0;
     g.xamlWaits = 0;
     KillTimer(g.wnd, kTimerInjectRetry);
   }
   if (g.taskbars.empty()) return;  // TaskbarCreated will bring us back
-  if (!g.tapReady) StartInjection();
+  if (!g.classic && !g.tapReady) StartInjection();
   Recompute(true);
+  ScheduleClassicReapply();  // Windows 10: Explorer may still be setting its own look up
 }
 
 // ---------------------------------------------------------- window proc
@@ -638,6 +788,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case kTimerReload:
           if (LoadConfig(false)) { UpdateEventHooks(); Recompute(true); }
           break;
+        case kTimerClassic: OnClassicTimer(); break;
       }
       return 0;
     case kMsgReload:
@@ -650,7 +801,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_SETTINGCHANGE:
       if (wp == SPI_SETWORKAREA) SetTimer(h, kTimerReset, 500, nullptr);
+      ScheduleClassicReapply();  // Windows 10: theme / colour / transparency changes
       return 0;
+    case WM_THEMECHANGED:
+    case WM_SYSCOLORCHANGE:
+    case WM_DWMCOLORIZATIONCOLORCHANGED:
+    case WM_DWMCOMPOSITIONCHANGED:
+      ScheduleClassicReapply();  // Windows 10 only; default handling stays as before
+      break;
     case WM_POWERBROADCAST:
       if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) SetTimer(h, kTimerReset, 2000, nullptr);
       return TRUE;
@@ -707,7 +865,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
   WriteDefaultConfigIfMissing();
   LoadConfig(true);
   Log(L"ClearBar starting, pid %lu", GetCurrentProcessId());
-  if (!CreateShared()) { Log(L"shared memory setup failed %lu", GetLastError()); return 3; }
+  const OsInfo os = QueryOs();
+  g.classic = IsClassicTaskbarBuild(os.build);
+  Log(L"Windows build %lu: %s taskbar", os.build, g.classic ? L"Windows 10" : L"Windows 11");
+  if (!IsSupportedBuild(os.build, os.productType)) {
+    Log(L"unsupported Windows build %lu (Windows 10 needs 2004-22H2, build 19041-19045)", os.build);
+    return 6;
+  }
+  if (g.classic) {
+    g.swca = reinterpret_cast<App::SwcaFn>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetWindowCompositionAttribute")));
+    if (!g.swca) { Log(L"SetWindowCompositionAttribute not found"); return 7; }
+  } else if (!CreateShared()) {
+    Log(L"shared memory setup failed %lu", GetLastError());
+    return 3;
+  }
 
   WNDCLASSEXW wc{sizeof(wc)};
   wc.lpfnWndProc = WndProc;
@@ -763,7 +935,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmd, int) {
 
   for (auto h : g.eventHooks) UnhookWinEvent(h);
   EndInjectionAttempt();
-  PublishEmpty();  // restore taskbars immediately rather than on process death
+  if (g.classic) RestoreClassic();  // Windows 10: Explorer re-applies its own look
+  else PublishEmpty();  // restore taskbars immediately rather than on process death
   Log(L"ClearBar exiting");
   return 0;
 }

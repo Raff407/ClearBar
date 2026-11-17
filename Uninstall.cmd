@@ -8,7 +8,7 @@ if not exist "%~dp0uninstall.ps1" (
   pause
   exit /b 1
 )
-echo Explorer will restart briefly at the end so every file can be removed.
+echo On Windows 11, Explorer restarts briefly at the end so every file can be removed.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1" -Yes
 echo.
 pause

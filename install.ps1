@@ -35,12 +35,22 @@ foreach ($f in $newExe, $newDll) {
   if (-not (Test-Path $f)) { throw "Missing $f. Extract the whole zip first (or run build.cmd if you built from source)." }
 }
 
-# Windows 11 only (the XAML taskbar arrived with build 22000).
-$build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuild
-if ($build -lt 22000) { throw "ClearBar needs Windows 11 (found build $build)." }
+# Windows 11 (XAML taskbar, build 22000+) or Windows 10 2004-22H2 (build 19041-19045).
+$nt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+$build = [int]$nt.CurrentBuild
+if ($build -lt 22000) {
+  if ($build -lt 19041 -or $build -gt 19045) {
+    throw "ClearBar needs Windows 11, or Windows 10 version 2004 to 22H2 (build 19041-19045). This PC has build $build."
+  }
+  # Same signal ClearBar.exe uses (wProductType): WinNT = workstation; ServerNT / LanmanNT = server.
+  $productType = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\ProductOptions').ProductType
+  if ($productType -ne 'WinNT') { throw 'Windows Server is not supported.' }
+}
+# Windows 10 and Windows 11 21H2 call the page "Apps & features"; 22H2 (22621) onwards "Installed apps".
+$appsPage = if ($build -lt 22621) { 'Settings > Apps > Apps & features' } else { 'Settings > Apps > Installed apps' }
 # x64 only: an x64 helper DLL cannot load into ARM64 Explorer.
 $arch = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment').PROCESSOR_ARCHITECTURE
-if ($arch -ne 'AMD64') { throw "ClearBar supports x64 Windows 11 only (this PC is $arch)." }
+if ($arch -ne 'AMD64') { throw "ClearBar supports x64 Windows 10/11 only (this PC is $arch)." }
 
 $dest = Join-Path $env:LOCALAPPDATA 'Programs\ClearBar'
 $exe = Join-Path $dest 'ClearBar.exe'
@@ -124,7 +134,7 @@ try {
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Priority 5
   $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
   Register-ScheduledTask -TaskName 'ClearBar' -Action $action -Trigger $trigger -Settings $settings `
-    -Principal $principal -Description 'ClearBar: transparent / blurred Windows 11 taskbar (local only, no network).' -Force | Out-Null
+    -Principal $principal -Description 'ClearBar: transparent / blurred Windows taskbar (local only, no network).' -Force | Out-Null
   $ok = $true
 }
 finally {
@@ -147,6 +157,6 @@ if ($ok) {
     Say 'Installed, but ClearBar did not start. Smart App Control or antivirus may have blocked it (see the FAQ).' Yellow
   }
   Say "Settings: $cfg  (saving the file applies changes instantly)"
-  Say 'To remove it: Settings > Apps > Installed apps > ClearBar, or Uninstall.cmd.'
+  Say "To remove it: $appsPage > ClearBar, or Uninstall.cmd."
   if (-not $running) { exit 1 }
 }

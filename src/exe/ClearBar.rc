@@ -15,7 +15,7 @@ BEGIN
     BLOCK "040904b0"
     BEGIN
       VALUE "CompanyName", "ClearBar contributors"
-      VALUE "FileDescription", "ClearBar - transparent / blurred Windows 11 taskbar"
+      VALUE "FileDescription", "ClearBar - transparent / blurred Windows 10/11 taskbar"
       VALUE "FileVersion", CLEARBAR_VERSION_STR
       VALUE "InternalName", "ClearBar"
       VALUE "LegalCopyright", "GPL-3.0-or-later"

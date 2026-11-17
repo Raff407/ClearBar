@@ -252,6 +252,18 @@ inline ShellSurface ClassifyForeground(std::wstring_view cls, std::wstring_view 
   return ShellSurface::None;
 }
 
+// Windows 10 (2004+): Start and Search are the same apps as on Windows 11; Task
+// View is an explorer.exe window titled "Task View" (Alt+Tab is "Task Switching").
+inline ShellSurface ClassifyForegroundClassic(std::wstring_view cls, std::wstring_view title,
+                                              std::wstring_view exeName, bool coversMonitor) {
+  const ShellSurface s = ClassifyForeground(cls, title, exeName, coversMonitor);
+  if (s != ShellSurface::None || !IEquals(exeName, L"explorer.exe")) return s;
+  if (title == L"Task Switching") return ShellSurface::None;
+  if (cls == L"MultitaskingViewFrame" && title == L"Task View") return ShellSurface::TaskView;
+  if (cls == L"Windows.UI.Core.CoreWindow" && (title == L"Task View" || coversMonitor)) return ShellSurface::TaskView;
+  return ShellSurface::None;
+}
+
 // Window-filter facts for "is this a real user window" (pure part).
 struct WindowFacts {
   bool visible, cloaked, iconic, zoomed, isRoot;
